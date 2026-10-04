@@ -66,9 +66,45 @@ In another terminal:
 
 ```bash
 gdb kernel/6.18.55/artifacts/vmlinux
+add-symbol-file driver/artifacts/r56p0-18eac0/linux-6.18.55/mali_kbase.ko
 target remote :1234
-break kbase_init
+break kbase_driver_init
 ```
+
+The driver is an **external module**, so its symbols live in `mali_kbase.ko`, not in `vmlinux` — loading `vmlinux` alone resolves no `kbase_*` symbol (1366 in the module, zero in the kernel image). `kbase_driver_init` is the static function passed to `module_init()` at `mali_kbase_core_linux.c:5005`; the module's exported entry point is `init_module`.
+
+At `-S` the module is not loaded yet, so `add-symbol-file` leaves it unrelocated and `kbase_driver_init` sits at its link-time offset. To break inside the driver, boot with `--serial`, `insmod` by hand, then re-add at the runtime base from `/proc/modules`:
+
+```bash
+add-symbol-file driver/artifacts/r56p0-18eac0/linux-6.18.55/mali_kbase.ko 0xffffffffa0000000
+```
+
+## Artifact bundle
+
+`tools/collect_artifacts.sh` collects the outputs of both build trees into one self-contained, checksummed directory:
+
+```bash
+./tools/collect_artifacts.sh 6.18.55            # 622M, includes vmlinux for GDB
+./tools/collect_artifacts.sh 6.18.55 --no-vmlinux
+cd artifacts && sha256sum -c MANIFEST.sha256
+```
+
+```text
+artifacts/
+├── README.txt              contents, how to verify, how to boot, caveats
+├── MANIFEST.sha256         sha256 of every other file
+├── build-info.txt          driver build provenance
+├── kernel/                 bzImage, vmlinux, System.map, Module.symvers, config
+├── driver/                 mali_kbase.ko, kernel-config, mali-release.txt
+├── boot/initramfs.cpio.gz  boots the module with no host tooling
+├── patches/r56p0/          the 3-patch set actually applied
+├── provenance/             upstream archive hash, driver checksums, config kind
+└── docs/                   PATCHES.md, BUG_BUNTY_COMPLIANCE.md
+```
+
+Verified to boot standalone from the bundle alone: `bzImage` + `initramfs.cpio.gz` → `insmod` → `RESULT: LOADED`, clean poweroff.
+
+Arm's proprietary Kbase tarball is **not** copied — only its SHA256 is recorded in `provenance/source-archive.sha256`. Redistributing it is not ours to do; obtain it from Arm's developer site and check it against that hash.
 
 `--verify` is the smoke test. It prints the running kernel, confirms KASAN came up, runs `insmod /mali_kbase.ko`, then reports `lsmod`, `/proc/modules` and the driver's `dmesg` output before powering off. Exit status is 0 only if QEMU powered down cleanly.
 

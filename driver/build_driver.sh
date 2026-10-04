@@ -3,10 +3,11 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/workspace.env" 2>/dev/null || true
-KVER=""; JOBS="${JOBS:-$(nproc)}"; SKIP=0; CLEAN=0
-usage(){ echo "Usage: $0 --kernel X.Y.Z [--jobs N] [--skip-patches] [--clean]"; }
-while [[ $# -gt 0 ]]; do case "$1" in --kernel) KVER="$2"; shift 2;; --jobs) JOBS="$2"; shift 2;; --skip-patches) SKIP=1; shift;; --clean) CLEAN=1; shift;; -h|--help) usage; exit 0;; *) echo "[!] unknown: $1"; usage; exit 2;; esac; done
+KVER=""; JOBS="${JOBS:-$(nproc)}"; SKIP=0; CLEAN=0; PATCH_SET=r56p0
+usage(){ echo "Usage: $0 --kernel X.Y.Z [--jobs N] [--patch-set r56p0|arm] [--skip-patches] [--clean]"; echo "  --patch-set  r56p0 (default) derived port for r56p0; arm = Arm's six verbatim patches"; }
+while [[ $# -gt 0 ]]; do case "$1" in --kernel) KVER="$2"; shift 2;; --jobs) JOBS="$2"; shift 2;; --patch-set) PATCH_SET="$2"; shift 2;; --skip-patches) SKIP=1; shift;; --clean) CLEAN=1; shift;; -h|--help) usage; exit 0;; *) echo "[!] unknown: $1"; usage; exit 2;; esac; done
 [[ "$KVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { usage; exit 2; }
+case "$PATCH_SET" in r56p0) PATCH_DIR="$PATCH_ROOT/r56p0"; PATCH_COUNT=2;; arm) PATCH_DIR="$PATCH_ROOT"; PATCH_COUNT=6;; *) echo "[!] unknown patch set: $PATCH_SET (expected r56p0 | arm)"; usage; exit 2;; esac
 KERNEL_SRC="$KERNEL_ROOT/$KVER/src/linux-$KVER"; KERNEL_BUILD="$KERNEL_ROOT/$KVER/build"
 ARCHIVE="$DRIVER_ROOT/AX504X08X-SW-99002-r56p0-18eac0.tar.gz"
 WORK="$DRIVER_ROOT/work/$KVER"; OUT="$DRIVER_ROOT/artifacts/r56p0-18eac0/linux-$KVER"; LOG="$DRIVER_ROOT/logs/$KVER"
@@ -22,7 +23,7 @@ grep -Fxq 'obj-$(CONFIG_MALI_MIDGARD) += arm/' "$KDIR/drivers/gpu/Makefile" || e
 grep -Fxq 'source "drivers/gpu/arm/Kconfig"' "$KDIR/drivers/video/Kconfig" || echo 'source "drivers/gpu/arm/Kconfig"' >> "$KDIR/drivers/video/Kconfig"
 SC="$KDIR/scripts/config"; chmod +x "$SC"; "$SC" --file "$KOUT/.config" --module CONFIG_MALI_MIDGARD; "$SC" --file "$KOUT/.config" --enable CONFIG_MALI_CSF_SUPPORT; "$SC" --file "$KOUT/.config" --enable CONFIG_MALI_EXPERT; "$SC" --file "$KOUT/.config" --enable CONFIG_MALI_NO_MALI; "$SC" --file "$KOUT/.config" --disable CONFIG_MALI_REAL_HW; "$SC" --file "$KOUT/.config" --set-str CONFIG_MALI_NO_MALI_DEFAULT_GPU tKRx; "$SC" --file "$KOUT/.config" --set-str CONFIG_MALI_PLATFORM_NAME vexpress
 make -C "$KDIR" O="$KOUT" olddefconfig
-PATCHES=("$PATCH_ROOT"/*.patch); [[ ${#PATCHES[@]} -eq 6 ]] || { echo '[!] expected exactly six patches'; exit 1; }
+PATCHES=("$PATCH_DIR"/*.patch); [[ ${#PATCHES[@]} -eq $PATCH_COUNT ]] || { echo "[!] expected exactly $PATCH_COUNT patch(es) in set '$PATCH_SET' ($PATCH_DIR), found ${#PATCHES[@]}"; exit 1; }; echo "[+] Patch set: $PATCH_SET ($PATCH_COUNT patch(es)) from $PATCH_DIR"
 if [[ "$SKIP" -eq 0 ]]; then for p in "${PATCHES[@]}"; do echo "===== DRY RUN $(basename "$p") ====="; patch --dry-run --batch -p3 -d "$KDIR" -i "$p"; done; for p in "${PATCHES[@]}"; do patch --batch -p3 -d "$KDIR" -i "$p"; done; else echo '[!] VP patches skipped'; fi
 make -C "$KDIR" O="$KOUT" olddefconfig
 make -C "$KDIR" O="$KOUT" modules_prepare
@@ -38,11 +39,14 @@ platform=vexpress
 mali_csf_support=y
 mali_no_mali=y
 vp_patches_skipped=$([[ $SKIP -eq 1 ]] && echo yes || echo no)
+patch_set=$PATCH_SET
+patch_count=$PATCH_COUNT
+patch_dir=$PATCH_DIR
 kernel_source=$KERNEL_SRC
 kernel_build=$KERNEL_BUILD
 integration_source=$KDIR
 integration_build=$KOUT
 built_at=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 INFO
-sha256sum "$OUT"/* "$ARCHIVE" "$PATCH_ROOT"/*.patch > "$OUT/SHA256SUMS"
+sha256sum "$OUT"/* "$ARCHIVE" "$PATCH_DIR"/*.patch > "$OUT/SHA256SUMS"
 file "$OUT/mali_kbase.ko"; echo "[+] SUCCESS: $OUT/mali_kbase.ko"

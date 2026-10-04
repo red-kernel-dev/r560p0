@@ -1,0 +1,96 @@
+From: r56p0 port for the Mali r56p0 x86_64 research kit
+Subject: [PATCH 1/2] r56p0: guard asm/arch_timer.h and arch_timer_get_cntfrq() for non-Arm CPUs
+
+Upstream Arm ships 0002-Fix-x86-build-error-for-missing-asm-arch_timer.h.patch
+and 0003-Workaround-arch_timer-funcs-undefined-for-NO_MALI.patch for this, but
+those hunks target r54p0 and only partially match r56p0-18eac0.
+
+This patch is the r56p0 reduction of both. It touches only the three files that
+are actually compiled under the configuration this kit builds
+(CONFIG_MALI_PLATFORM_NAME="vexpress", CONFIG_MALI_NO_MALI=y,
+CONFIG_MALI_CSF_SUPPORT=y):
+
+  include/linux/mali_hw_access.h
+  backend/gpu/mali_kbase_time.c
+  csf/mali_kbase_csf_firmware_no_mali.c
+
+Deliberately NOT touched, with reasons:
+
+  backend/gpu/mali_kbase_model_dummy.c
+      Already guarded upstream in r56p0 (#ifdef CONFIG_ARM64 around the
+      <asm/arch_timer.h> include). Arm's 0002 hunk for it is redundant.
+
+  csf/mali_kbase_csf_firmware.c
+      Only built in the non-NO_MALI branch of csf/Kbuild, so it is not part of
+      this build. Arm's 0002 hunk for it is dead here.
+
+  platform/devicetree/mali_kbase_clk_rate_trace.c
+      Not built under CONFIG_MALI_PLATFORM_NAME="vexpress". Kbuild includes
+      platform/$(MALI_PLATFORM_DIR)/Kbuild, and platform/vexpress/Kbuild builds
+      only mali_kbase_config_vexpress.o and mali_kbase_platform_fake.o -- there
+      is no clk_rate_trace.c on that path. This is also why Arm's 0003 hunk for
+      this file does not apply: r56p0 refactored it to call
+      kbase_arch_timer_get_cntfrq(kbdev) and added an xlnx,versal check.
+
+Unlike Arm's 0003, this port includes <linux/time64.h> explicitly for USEC_PER_SEC
+rather than relying on transitive inclusion, because that was only ever tested
+against r54p0.
+
+---
+--- a/product/kernel/include/linux/mali_hw_access.h
++++ b/product/kernel/include/linux/mali_hw_access.h
+@@ -22,7 +22,9 @@
+ #ifndef _MALI_HW_ACCESS_H_
+ #define _MALI_HW_ACCESS_H_
+ 
++#if IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64)
+ #include <asm/arch_timer.h>
++#endif /* IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64) */
+ #include <linux/io.h>
+ 
+ 
+@@ -34,7 +36,19 @@
+ 
+ #define mali_iounmap(addr) iounmap(addr)
+ 
++#if IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64)
+ #define mali_arch_timer_get_cntfrq() arch_timer_get_cntfrq()
++#else
++/* r56p0 port (Arm's 0003 equivalent): asm/arch_timer.h does not exist on
++ * non-Arm CPUs. kbase_backend_time_init() requires a non-zero frequency, so
++ * substitute a constant. On the x86 "No Mali" virtual platform there is no Arm
++ * system timer at all and no real clock is registered ("Clock not available for
++ * devfreq"), so this value only feeds devfreq / GPU_ACTIVE normalisation
++ * arithmetic and is not a functional frequency.
++ */
++#include <linux/time64.h>
++#define mali_arch_timer_get_cntfrq() USEC_PER_SEC
++#endif /* IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64) */
+ 
+ 
+ #define mali_readq(addr) ((u64)mali_readl(addr) | ((u64)mali_readl(addr + 4) << 32))
+--- a/product/kernel/drivers/gpu/arm/midgard/backend/gpu/mali_kbase_time.c
++++ b/product/kernel/drivers/gpu/arm/midgard/backend/gpu/mali_kbase_time.c
+@@ -28,8 +28,9 @@
+ #include <mali_kbase_config_defaults.h>
+ #include <mali_kbase_io.h>
+ #include <linux/version_compat_defs.h>
++#if IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64)
+ #include <asm/arch_timer.h>
+-
++#endif /* IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64) */
+ #include <linux/mali_hw_access.h>
+ 
+ struct kbase_timeout_info {
+--- a/product/kernel/drivers/gpu/arm/midgard/csf/mali_kbase_csf_firmware_no_mali.c
++++ b/product/kernel/drivers/gpu/arm/midgard/csf/mali_kbase_csf_firmware_no_mali.c
+@@ -44,7 +44,9 @@
+ #if (KERNEL_VERSION(4, 13, 0) <= LINUX_VERSION_CODE)
+ #include <linux/set_memory.h>
+ #endif
++#if IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64)
+ #include <asm/arch_timer.h>
++#endif /* IS_ENABLED(CONFIG_ARM) || IS_ENABLED(CONFIG_ARM64) */
+ #include <mali_kbase_config_defaults.h>
+ 
+ #ifdef CONFIG_MALI_DEBUG

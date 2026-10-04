@@ -20,5 +20,11 @@ kernel/.downloads/
 # Console logs captured from detached build runs (LOG_ROOT in workspace.env)
 /logs/
 
+# BusyBox initramfs built by rootfs/build_rootfs.sh: the packed image is ~19M
+# because it embeds the 60M (uncompressed) mali_kbase.ko. Regenerate it with
+# ./rootfs/build_rootfs.sh rather than tracking it.
+/rootfs/initramfs.cpio.gz
+/rootfs/initramfs/
+
 # Kernel and rootfs artifacts, if ARTIFACT_ROOT is populated
 /artifacts/

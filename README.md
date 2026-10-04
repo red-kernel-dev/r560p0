@@ -46,9 +46,13 @@ driver/artifacts/r56p0-18eac0/linux-6.18.55/
 
 ## QEMU/GDB
 
+`build_rootfs.sh` embeds the built `mali_kbase.ko` in the initramfs at `/mali_kbase.ko`, so the guest can load it with no host tooling.
+
 ```bash
-./rootfs/build_rootfs.sh
-./qemu/boot_kernel_gdb.sh 6.18.55
+./rootfs/build_rootfs.sh 6.18.55
+./qemu/boot_kernel_gdb.sh 6.18.55 --verify   # boot, load the module, report, power off
+./qemu/boot_kernel_gdb.sh 6.18.55 --serial   # straight to a serial shell
+./qemu/boot_kernel_gdb.sh 6.18.55            # halted at reset, waiting for GDB on :1234
 ```
 
 In another terminal:
@@ -56,7 +60,34 @@ In another terminal:
 ```bash
 gdb kernel/6.18.55/artifacts/vmlinux
 target remote :1234
+break kbase_init
 ```
+
+`--verify` is the smoke test. It prints the running kernel, confirms KASAN came up, runs `insmod /mali_kbase.ko`, then reports `lsmod`, `/proc/modules` and the driver's `dmesg` output before powering off. Exit status is 0 only if QEMU powered down cleanly.
+
+Two deliberate choices. `rp.verify` on the kernel command line drives the shutdown rather than piping `poweroff` down the serial console, which races the shell prompt and loses characters. And KVM is used only when `/dev/kvm` is readable, otherwise QEMU falls back to TCG — slower, but it needs no privileges, so the kit works inside an unprivileged container.
+
+### Verified boot
+
+Measured on this configuration, 6.18.55/x86_64 under TCG, ~65s to a clean poweroff:
+
+```
+KernelAddressSanitizer initialized (generic)
+mali_kbase: loading out-of-tree module taints kernel.
+mali mali.0: Kernel DDK version r56p0-18eac0
+mali mali.0: Using Dummy Model
+mali mali.0: GPU identified as 0x0 arch 13.8.1 r0p0 status 0
+mali mali.0: Probed as mali0
+insmod exit=0
+RESULT: LOADED
+mali_kbase 3989504 0 - Live 0xffffffffa0000000 (O)
+```
+
+Zero `WARNING:`, `Oops`, `Call Trace`, `kernel BUG` or sanitiser reports across the whole boot. `Tainted: G` is expected and correct — the driver declares `MODULE_LICENSE("GPL")` and loads out of tree.
+
+Two runtime messages are expected on the dummy model and are **not** faults: `No OPPs found in device tree!` and `Clock not available for devfreq / Continuing without devfreq`. There is no real device tree or clock behind `CONFIG_MALI_NO_MALI`, and the driver degrades gracefully. Note the second one only compiles at all because the kernel exports the devfreq and OPP symbols — see below.
+
+**Scope limit:** this is the dummy model, so no GPU or firmware memory is actually exercised. Loading the module proves the build and the symbol contract; it does not prove any GPU path works. No `/dev/mali*` node is registered.
 
 ## Important
 

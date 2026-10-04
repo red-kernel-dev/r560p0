@@ -3,9 +3,10 @@
 # boot_kernel_gdb.sh -- boot the research kernel under QEMU.
 #
 # Usage:
-#   ./boot_kernel_gdb.sh [version]              # paused, waiting for GDB on :1234
-#   ./boot_kernel_gdb.sh [version] --verify     # boot, run checks, power off
-#   ./boot_kernel_gdb.sh [version] --serial     # boot straight to a serial shell
+#   ./boot_kernel_gdb.sh [version]                    # paused, waiting for GDB on :1234
+#   ./boot_kernel_gdb.sh [version] --verify           # boot, run checks, power off
+#   ./boot_kernel_gdb.sh [version] --serial           # boot straight to a serial shell
+#   ./boot_kernel_gdb.sh [version] --conformant [...]  # boot the --conformant kernel
 #
 # GDB on the host:
 #   gdb -ex 'target remote :1234' -ex 'break kbase_init' vmlinux
@@ -28,27 +29,41 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 V=""
 MODE=gdb
+CONFORMANT=0
 for a in "$@"; do
     case "$a" in
         --verify) MODE=verify ;;
         --serial) MODE=serial ;;
-        -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+        --conformant) CONFORMANT=1 ;;
+        -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
         [0-9]*.[0-9]*.[0-9]*) V="$a" ;;
         *) echo "[!] unknown argument: $a" >&2; exit 2 ;;
     esac
 done
 V="${V:-6.18.55}"
 
-K="$ROOT/kernel/$V/artifacts/bzImage"
-[[ -f "$K" ]] || { echo "[!] missing $K -- run kernel/build_kernel.sh $V" >&2; exit 1; }
+if [[ "$CONFORMANT" -eq 1 ]]; then
+    # Booted kernel produced by: build_kernel.sh <ver> --conformant
+    K="$ROOT/kernel/$V/artifacts-conformant/bzImage"
+    # nokaslr MUST NOT be used here. Arm's Device Configuration Guidelines permit
+    # only CONFIG_COMPAT, the ARM64 page-size choice, CONFIG_KASAN* and
+    # CONFIG_UBSAN* to differ from the default kernel config, and the conformant
+    # build leaves CONFIG_RANDOMIZE_BASE at its default (y). Disabling KASLR at
+    # runtime would reintroduce exactly the deviation -- and the removed
+    # hardening -- that --conformant exists to avoid.
+    CMDLINE='console=ttyS0 panic=-1'
+else
+    K="$ROOT/kernel/$V/artifacts/bzImage"
+    CMDLINE='console=ttyS0 nokaslr panic=-1'
+fi
+
+[[ -f "$K" ]] || { echo "[!] missing $K -- run kernel/build_kernel.sh $V${CONFORMANT:+ --conformant}" >&2; exit 1; }
 
 INITRD="$ROOT/rootfs/initramfs.cpio.gz"
 [[ -f "$INITRD" ]] || echo "[!] no initramfs at $INITRD; boot without one" >&2
 
 ACCEL=tcg
 [[ -r /dev/kvm ]] && ACCEL=kvm
-
-CMDLINE='console=ttyS0 nokaslr panic=-1'
 
 case "$MODE" in
     gdb)

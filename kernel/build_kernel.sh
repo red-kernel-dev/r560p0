@@ -38,13 +38,42 @@ set -Eeuo pipefail
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION="${1:-}"
+VERSION=""; CONFORMANT=0; CONFIG_ONLY=0
+
+usage() {
+    cat <<'USAGE'
+Usage: build_kernel.sh <kernel-version> [--conformant] [--config-only]
+
+  --conformant   Emit only the kernel config deviations the Arm GPU Bug Bounty
+                 permits: CONFIG_COMPAT, the ARM64 page-size choice, CONFIG_KASAN*
+                 and CONFIG_UBSAN*. Development conveniences (KCOV, DWARF5,
+                 GDB_SCRIPTS, KALLSYMS_ALL, SLUB_DEBUG_ON, RANDOMIZE_BASE=off,
+                 nokaslr) are NOT applied. See docs/BUG_BUNTY_COMPLIANCE.md.
+
+                 The five Mali driver prerequisites are still applied, because
+                 the external module cannot link without them. They are reported
+                 separately as a known deviation pending Arm's confirmation.
+
+  --config-only  Configure, verify and save .config, then stop. Skips the
+                 compile, so a config can be validated in seconds.
+
+Env:
+  JOBS=N         Parallel compile jobs (default: nproc)
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --conformant)  CONFORMANT=1; shift ;;
+        --config-only) CONFIG_ONLY=1; shift ;;
+        -h|--help)     usage; exit 0 ;;
+        [0-9]*.[0-9]*.[0-9]*) VERSION="$1"; shift ;;
+        *) echo "[!] unknown argument: $1" >&2; usage; exit 2 ;;
+    esac
+done
 
 if [[ -z "$VERSION" ]]; then
-    echo "Usage: $0 <kernel-version>"
-    echo
-    echo "Example:"
-    echo "  $0 6.18.55"
+    usage
     exit 2
 fi
 
@@ -58,10 +87,25 @@ JOBS="${JOBS:-$(nproc)}"
 
 VERSION_DIR="$SCRIPT_DIR/$VERSION"
 SRC_ROOT="$VERSION_DIR/src"
-BUILD_DIR="$VERSION_DIR/build"
 LOG_DIR="$VERSION_DIR/logs"
 ARTIFACT_DIR="$VERSION_DIR/artifacts"
 DOWNLOAD_DIR="$SCRIPT_DIR/.downloads"
+
+# Each mode gets its own O= directory. Changing .config invalidates
+# include/generated/autoconf.h and forces a near-total rebuild, so sharing one
+# build dir would mean rebuilding from scratch every time you switch between
+# hunting a bug and confirming it.
+#
+# Note the disk cost: a compiled kernel build is ~4.3G, so holding BOTH modes
+# compiled at once needs ~8.6G. --config-only is cheap (~100M), so it is
+# perfectly reasonable to keep both configurations and compile one at a time.
+if [[ "$CONFORMANT" -eq 1 ]]; then
+    BUILD_DIR="$VERSION_DIR/build-conformant"
+    ARTIFACT_DIR="$VERSION_DIR/artifacts-conformant"
+else
+    BUILD_DIR="$VERSION_DIR/build"
+    ARTIFACT_DIR="$VERSION_DIR/artifacts"
+fi
 
 SRC_DIR="$SRC_ROOT/linux-$VERSION"
 ARCHIVE="$DOWNLOAD_DIR/linux-$VERSION.tar.xz"
@@ -158,7 +202,10 @@ make \
 CONFIG="$BUILD_DIR/.config"
 
 # ------------------------------------------------------------
-# Enable research/debug/fuzzing facilities
+# Permitted by the Arm GPU Bug Bounty: CONFIG_COMPAT, the ARM64 page-size
+# choice, CONFIG_KASAN* and CONFIG_UBSAN*. 64BIT/X86_64/MODULES/DEVTMPFS are
+# structural for this kit rather than research choices. The rest of what Arm
+# permits is applied further down, split by mode.
 # ------------------------------------------------------------
 
 echo
@@ -171,24 +218,9 @@ scripts/config \
     --enable CONFIG_MODULES \
     --enable CONFIG_MODULE_UNLOAD \
     --enable CONFIG_DEVTMPFS \
-    --enable CONFIG_DEVTMPFS_MOUNT \
-    --enable CONFIG_KCOV \
     --enable CONFIG_KASAN \
     --enable CONFIG_KASAN_GENERIC \
-    --enable CONFIG_UBSAN \
-    --enable CONFIG_DEBUG_INFO \
-    --enable CONFIG_DEBUG_INFO_DWARF5 \
-    --enable CONFIG_GDB_SCRIPTS \
-    --enable CONFIG_FRAME_POINTER \
-    --enable CONFIG_KALLSYMS \
-    --enable CONFIG_KALLSYMS_ALL \
-    --enable CONFIG_DEBUG_KERNEL \
-    --enable CONFIG_DEBUG_FS \
-    --enable CONFIG_MAGIC_SYSRQ \
-    --enable CONFIG_STACKTRACE \
-    --enable CONFIG_SLUB_DEBUG \
-    --enable CONFIG_SLUB_DEBUG_ON \
-    --disable CONFIG_RANDOMIZE_BASE
+    --enable CONFIG_UBSAN
 
 # ------------------------------------------------------------
 # Mali driver prerequisites
@@ -235,6 +267,55 @@ scripts/config \
     --enable CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND
 
 # ------------------------------------------------------------
+# Development-only conveniences  (NOT applied with --conformant)
+# ------------------------------------------------------------
+#
+# Every option below is outside the set the Arm GPU Bug Bounty permits to deviate
+# from the default kernel config. They are excellent for finding and debugging
+# bugs, and useless -- or counterproductive -- in a configuration you intend to
+# validate a finding in. RANDOMIZE_BASE=off and nokaslr in particular REMOVE
+# hardening, so a bug demonstrated on such a build may not reproduce on the
+# device a report has to be demonstrated on.
+#
+#   KCOV                 coverage instrumentation; Arm's KASAN/UBSAN are the
+#                        sanctioned instrumentation and are applied above
+#   DEBUG_INFO_DWARF5    larger kernel, and a config that is not the default
+#   GDB_SCRIPTS          debugging convenience
+#   KALLSYMS_ALL         debugging convenience
+#   STACKTRACE           debugging convenience
+#   DEBUG_FS             debugging convenience
+#   MAGIC_SYSRQ          host-side debugging
+#   SLUB_DEBUG_ON        alters allocator behaviour
+#   DEVTMPFS_MOUNT       alters early boot
+#   RANDOMIZE_BASE=off   removes KASLR
+#   FRAME_POINTER        no-op on x86_64 anyway (needs ARCH_WANT_FRAME_POINTERS)
+#
+# So: use them to find bugs. Rebuild with --conformant before you claim one.
+
+if [[ "$CONFORMANT" -eq 0 ]]; then
+    scripts/config \
+        --file "$CONFIG" \
+        --enable CONFIG_KCOV \
+        --enable CONFIG_DEBUG_INFO \
+        --enable CONFIG_DEBUG_INFO_DWARF5 \
+        --enable CONFIG_GDB_SCRIPTS \
+        --enable CONFIG_FRAME_POINTER \
+        --enable CONFIG_KALLSYMS \
+        --enable CONFIG_KALLSYMS_ALL \
+        --enable CONFIG_DEBUG_KERNEL \
+        --enable CONFIG_DEBUG_FS \
+        --enable CONFIG_MAGIC_SYSRQ \
+        --enable CONFIG_STACKTRACE \
+        --enable CONFIG_SLUB_DEBUG \
+        --enable CONFIG_SLUB_DEBUG_ON \
+        --disable CONFIG_RANDOMIZE_BASE
+else
+    echo "[+] --conformant: skipping all non-permitted config deviations."
+    echo "    Debugging aids (KCOV, DWARF5, GDB_SCRIPTS, KALLSYMS_ALL,"
+    echo "    SLUB_DEBUG_ON, RANDOMIZE_BASE=off, ...) are NOT applied."
+fi
+
+# ------------------------------------------------------------
 # Normalize configuration
 # ------------------------------------------------------------
 
@@ -277,6 +358,149 @@ if [[ "$mali_prereq_ok" -ne 1 ]]; then
     exit 1
 fi
 
+# ------------------------------------------------------------
+# Arm Bug Bounty compliance checks
+# ------------------------------------------------------------
+#
+# From the Device Configuration Guidelines (document version 20250623-1.0):
+#
+#   "Where possible, the default Kernel configuration should be used. Only the
+#    following Kernel Build KConfig options may be changed ... CONFIG_COMPAT,
+#    [ARM64_4K_PAGES|ARM64_16K_PAGES], CONFIG_KASAN* ... CONFIG_UBSAN*"
+#
+#   "Any of the CONFIG_KASAN* options may be set to y or n, except for the
+#    following: CONFIG_KASAN_*_TEST, must be set to n"
+#   "Any of the CONFIG_UBSAN* options may be set to y or n, except for the
+#    following: CONFIG_TEST_UBSAN, must be set to n"
+#   "the Arm Mali Kernel Driver only supports 64-bit kernels"
+#
+# These are checked rather than assumed, because a silently-satisfied constraint
+# is indistinguishable from an unnoticed violation once a report depends on it.
+
+echo
+if [[ "$CONFORMANT" -eq 1 ]]; then
+    echo "[+] Arm Bug Bounty compliance checks (--conformant)"
+else
+    echo "[+] Arm Bug Bounty compliance checks (development build)"
+fi
+
+compliance_ok=1
+
+# 1. Hard prohibitions: the *_TEST options Arm requires to be off.
+for sym in KASAN_UNIT_TEST KASAN_KUNIT_TEST KASAN_MODULE_TEST KASAN_KUNIT_TEST_MODULE TEST_UBSAN; do
+    if grep -qx "CONFIG_${sym}=y" "$CONFIG"; then
+        printf '    %-34s y   <-- VIOLATION: Arm requires n\n' "CONFIG_${sym}"
+        compliance_ok=0
+    else
+        printf '    %-34s n    ok\n' "CONFIG_${sym}"
+    fi
+done
+
+# 2. 64-bit only.
+if grep -qx "CONFIG_64BIT=y" "$CONFIG"; then
+    printf '    %-34s y    ok (64-bit required)\n' "CONFIG_64BIT"
+else
+    printf '    %-34s %s  <-- VIOLATION: Kbase requires a 64-bit kernel\n' \
+        "CONFIG_64BIT" "$(grep -E '^(CONFIG_64BIT=|# CONFIG_64BIT )' "$CONFIG" || echo absent)"
+    compliance_ok=0
+fi
+
+# 3. In --conformant mode the development aids must be at their defaults. Report
+#    rather than assert, because several are already on in x86_64_defconfig and
+#    their presence is then not something this script introduced.
+if [[ "$CONFORMANT" -eq 1 ]]; then
+    echo
+    echo "    Auditing against the resolved default kernel config..."
+    # Measure, do not reason. Comparing against arch/x86/configs/x86_64_defconfig
+    # *text* is misleading: options such as DEBUG_FS, STACKTRACE and SLUB_DEBUG do
+    # not appear in it literally but ARE in the resolved default, because
+    # olddefconfig pulls them in as dependencies. So resolve a real default here
+    # and diff against that.
+    #
+    # Configs are normalised to symbol=value so that "not set" and "=n" compare
+    # equal, otherwise every unset symbol looks like a difference.
+    audit_dir="$(mktemp -d "${TMPDIR:-/tmp}/config-audit.XXXXXX")"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$audit_dir'" EXIT
+    normalise() {
+        sed -n -e 's/^\(CONFIG_[A-Za-z0-9_]*\)=\(.*\)$/\1=\2/p' \
+               -e 's/^# \(CONFIG_[A-Za-z0-9_]*\) is not set$/\1=n/p' "$1" | sort -u
+    }
+    if make -s O="$audit_dir" ARCH=x86_64 defconfig >/dev/null 2>&1 \
+       && [[ -f "$audit_dir/.config" ]]; then
+        normalise "$audit_dir/.config" > "$audit_dir/base"
+        normalise "$CONFIG"            > "$audit_dir/ours"
+        added=$(comm -13 "$audit_dir/base" "$audit_dir/ours" | wc -l | tr -d ' ')
+        removed=$(comm -23 "$audit_dir/base" "$audit_dir/ours" | wc -l | tr -d ' ')
+        # A raw comm diff is mostly noise: enabling COMMON_CLK and PM_DEVFREQ makes
+        # their sub-options *visible*, so dozens of symbols go from absent to an
+        # explicit "=n" without anything actually changing. The real deviation
+        # surface is the set that went from not-enabled to y or m.
+        newly_on=$(comm -13 "$audit_dir/base" "$audit_dir/ours" \
+                   | grep -cE '=(y|m)$' || true)
+        printf '    %-34s %s newly enabled, %s newly visible-but-off, %s cleared\n' \
+            "vs resolved defconfig" "$newly_on" "$((added - newly_on))" "$removed"
+
+        # Classify what was newly enabled. Anything that is neither a permitted
+        # option nor one of the declared driver prerequisites is a dependency
+        # that the permitted options pulled in -- legitimate under Arm's
+        # "compatible with each other", but shown so it can be reviewed rather
+        # than assumed.
+        echo
+        echo "    Newly enabled, and NOT in the permitted set:"
+        unaccounted=0
+        while IFS= read -r line; do
+            sym="${line%%=*}"
+            case "$sym" in
+                CONFIG_KASAN*|CONFIG_UBSAN*|CONFIG_COMPAT|\
+                CONFIG_ARM64_4K_PAGES|CONFIG_ARM64_16K_PAGES|\
+                CONFIG_COMMON_CLK|CONFIG_PM_OPP|CONFIG_PM_DEVFREQ|\
+                CONFIG_DEVFREQ_THERMAL|CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND)
+                    continue ;;
+            esac
+            unaccounted=$((unaccounted + 1))
+            if [[ "$unaccounted" -le 25 ]]; then
+                printf '      %-30s %s\n' "$sym" "${line#*=}"
+            fi
+        done < <(comm -13 "$audit_dir/base" "$audit_dir/ours" | grep -E '=(y|m)$')
+        if [[ "$unaccounted" -gt 25 ]]; then
+            printf '      ... and %s more\n' "$((unaccounted - 25))"
+        fi
+        if [[ "$unaccounted" -eq 0 ]]; then
+            echo "      (none)"
+        else
+            echo
+            echo "      Expected: these are dependencies pulled in by the permitted"
+            echo "      KASAN/UBSAN options and by the declared driver prerequisites."
+            echo "      Arm allows the permitted options to be used together, so these"
+            echo "      are reviewable rather than violations -- but they are shown"
+            echo "      because 'it is only a dependency' is a claim worth checking."
+        fi
+    else
+        echo "    [!] could not resolve the default config for comparison;"
+        echo "        skipping the diff audit (the hard checks above still ran)"
+    fi
+    echo
+    echo "    Do NOT pass 'nokaslr' to QEMU in --conformant mode."
+fi
+
+if [[ "$compliance_ok" -ne 1 ]]; then
+    echo
+    echo "[!] Arm Bug Bounty compliance check FAILED. Do not use this build to"
+    echo "    substantiate a submission until the violations above are resolved."
+    exit 1
+fi
+
+# 4. Report, without failing: the Mali prerequisites are a deviation from the
+#    permitted set, but an unavoidable one -- the external module cannot link
+#    without them, so no finding is reachable without them.
+echo
+echo "    Known deviation from the permitted set (unavoidable here):"
+printf '      %-28s %s\n' "driver prerequisites" "COMMON_CLK, PM_OPP, PM_DEVFREQ, DEVFREQ_THERMAL, DEVFREQ_GOV_SIMPLE_ONDEMAND"
+echo "      The driver is an external module linking against this kernel's"
+echo "      exports; without these it fails at modpost with 16 undefined"
+echo "      symbols. Pending Arm's confirmation -- see docs/BUG_BUNTY_COMPLIANCE.md"
+
 # Save exact configuration used.
 cp \
     "$CONFIG" \
@@ -290,12 +514,19 @@ echo
 echo "[+] Important configuration:"
 
 grep -E \
-    '^CONFIG_(64BIT|X86_64|MODULES|MODULE_UNLOAD|DEVTMPFS|DEVTMPFS_MOUNT|KCOV|KASAN|KASAN_GENERIC|UBSAN|DEBUG_INFO|DEBUG_INFO_DWARF5|GDB_SCRIPTS|FRAME_POINTER|KALLSYMS|KALLSYMS_ALL|DEBUG_KERNEL|DEBUG_FS|MAGIC_SYSRQ|STACKTRACE|SLUB_DEBUG|SLUB_DEBUG_ON|RANDOMIZE_BASE)=' \
+    '^CONFIG_(64BIT|X86_64|MODULES|MODULE_UNLOAD|DEVTMPFS|DEVTMPFS_MOUNT|KCOV|KASAN|KASAN_GENERIC|UBSAN|DEBUG_INFO|DEBUG_INFO_DWARF5|GDB_SCRIPTS|FRAME_POINTER|KALLSYMS|KALLSYMS_ALL|DEBUG_KERNEL|DEBUG_FS|MAGIC_SYSRQ|STACKTRACE|SLUB_DEBUG|SLUB_DEBUG_ON|RANDOMIZE_BASE|COMMON_CLK|PM_OPP|PM_DEVFREQ|DEVFREQ_THERMAL|DEVFREQ_GOV_SIMPLE_ONDEMAND)=' \
     "$CONFIG" || true
 
 # ------------------------------------------------------------
 # Build
 # ------------------------------------------------------------
+
+if [[ "$CONFIG_ONLY" -eq 1 ]]; then
+    echo
+    echo "[+] --config-only: configuration written to $CONFIG"
+    echo "[+] Not compiling. Re-run without --config-only to build."
+    exit 0
+fi
 
 echo
 echo "[+] Building Linux $VERSION..."

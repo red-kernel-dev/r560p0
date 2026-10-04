@@ -16,6 +16,13 @@ source ./workspace.env
 ./driver/build_driver.sh --kernel 6.18.55
 ```
 
+> **Arm Bug Bounty.** This configuration is a *research harness*, not a submission
+> environment. The dummy model cannot execute GPU firmware, so CSFFW is out of reach
+> and GPU/firmware memory-access bugs cannot be tested here. The development kernel
+> also deviates from Arm's permitted config set. Use
+> `./kernel/build_kernel.sh 6.18.55 --conformant` to produce a submission-shaped
+> kernel, and read `docs/BUG_BUNTY_COMPLIANCE.md` before claiming anything.
+
 ## Driver builder
 
 `driver/build_driver.sh` extracts the exact included `AX504X08X-SW-99002-r56p0-18eac0.tar.gz`, verifies r56p0, creates a private integration copy of the selected Linux source, configures the x86 Simulated Platform/No-Mali/CSF settings, then dry-runs every patch in the selected set. It **stops** if any patch fails to apply; it does not force or silently port a patch.

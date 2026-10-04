@@ -24,7 +24,41 @@ These are **not** applied to r56p0. See the table below.
 ```
 0001-r56p0-guard-arch_timer-for-non-Arm.patch              locally authored
 0002-Fix-no-definition-of-dmb-in-non-Arm-platforms.patch  Arm 0004, byte-identical
+0003-r56p0-drop-stale-arbitration-Kconfig-source.patch     locally authored
 ```
+
+### 0003 — an upstream r56p0 Kconfig bug
+
+`drivers/gpu/arm/Kconfig:25` unconditionally sources
+`$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/arbitration/Kconfig`, but
+`drivers/gpu/arm/` contains only `midgard/` — there is no `arbitration/`
+directory anywhere in the release, and `CONFIG_MALI_HAS_VIRTUALIZATION` is
+referenced neither in any Kbuild nor in any Kconfig.
+`MALI_KCONFIG_EXT_PREFIX` is never assigned in this release, so it expands to
+nothing. The result is a hard failure at the *first* `olddefconfig`, before any
+patching is reached:
+
+```
+drivers/gpu/arm/Kconfig:25: can't open file "drivers/gpu/arm/arbitration/Kconfig"
+make[3]: *** [.../scripts/kconfig/Makefile:85: olddefconfig] Error 1
+```
+
+Arm's 0006 does **not** help here, for two independent reasons: the r56p0 Kbuild
+contains no arbitration reference for it to guard, and 0006 never touched the
+Kconfig — which is the thing that actually breaks.
+
+Guarding the `source` line is safe because nothing in the release defines or
+consumes the arbitration symbols. Arm's own Virtual Platform How-To Guide
+(Troubleshooting) confirms the arbitration reference code is optional: *"in most
+cases the Arbitration code is not required, such as in testing systems where only
+a single Guest OS is using the GPU."*
+
+`midgard/Mconfig:338` has the same stale reference, but Mconfig is meson-only
+and this kit builds with kbuild, so it is left alone and reported as ignored.
+
+**Consequence for ordering:** because this bug lives in a Kconfig file, the
+driver builder applies patches *before* resolving the kernel config. Applying
+them afterwards cannot work — `olddefconfig` never gets to run.
 
 ## Why the port exists
 
@@ -77,9 +111,22 @@ bug.
 ./patches/verify_against_kbase.sh arm    # dry-run Arm's six (expected: 1/6)
 ```
 
-`build_driver.sh` then gates the real build: it dry-runs every patch in the
-selected set, and **stops** if any fails. It never forces and never silently
-ports a patch.
+`verify_against_kbase.sh` does more than dry-run. "All patches apply cleanly" is
+**not** sufficient — patch 0003 exists precisely because the whole set applied
+cleanly to a tree that could not be configured. So after applying the set to a
+scratch copy it re-scans every `source` statement in the kbuild Kconfig files
+and fails if any referenced file is still missing. Stale `Mconfig` references are
+reported as informational, since this kit uses kbuild.
+
+That scan deliberately models a counter-intuitive kconfig behaviour: a sourced
+file is included **even inside a false `#if 0` block**. Only a `#` comment
+actually disables a `source` line. Confirmed empirically against 6.18.55, where
+the `#if 0` variant of patch 0003 still failed with the original error. So the
+check drops comment lines and treats every remaining `source` as live.
+
+`build_driver.sh` then gates the real build: it applies the selected set
+**before** the first `olddefconfig`, and **stops** if any patch fails. It never
+forces and never silently ports a patch.
 
 ```bash
 ./driver/build_driver.sh --kernel 6.18.55                  # r56p0 set
@@ -87,3 +134,52 @@ ports a patch.
 ```
 
 The chosen set is recorded in `build-info.txt` and covered by `SHA256SUMS`.
+
+## The kernel must export the driver's symbols
+
+The driver is an **external module**, but it links against the exports of the
+kernel that `build_kernel.sh` produced. `modules_prepare` compiles it; it does
+not link it. So every symbol the driver imports must already be built into
+`vmlinux`, and three consequences follow — all three were hit in practice.
+
+**1. The kernel needs the driver's prerequisites even though the driver is
+absent from it.** The first complete compile of r56p0 failed at MODPOST with 16
+undefined symbols, from four subsystems that kernel had never been built with:
+
+| Symbol(s) | Defined in | Required kernel option |
+|---|---|---|
+| `__clk_is_enabled` | `drivers/clk/clk.c` | `CONFIG_COMMON_CLK` |
+| `devfreq_add_device`, `devfreq_suspend_device`, `devfreq_resume_device`, `devfreq_register_opp_notifier`, `devfreq_unregister_opp_notifier`, `devfreq_recommended_opp`, `devfreq_remove_device` | `drivers/devfreq/devfreq.c` | `CONFIG_PM_DEVFREQ` |
+| `dev_pm_opp_find_freq_ceil`, `dev_pm_opp_find_freq_exact`, `dev_pm_opp_find_freq_floor`, `dev_pm_opp_get_opp_count`, `dev_pm_opp_get_voltage`, `dev_pm_opp_put` | `drivers/opp/core.c` | `CONFIG_PM_OPP` |
+| `devfreq_cooling_em_register`, `devfreq_cooling_unregister` | `drivers/thermal/devfreq_cooling.c` | `CONFIG_DEVFREQ_THERMAL` |
+
+Two naming traps. The devfreq option is **`PM_DEVFREQ`**, not `DEVFREQ` — it was
+renamed in 6.13, and the old name is silently ignored. And `DEVFREQ_THERMAL` is
+gated by `thermal_sys-$(CONFIG_DEVFREQ_THERMAL)` in `drivers/thermal/Makefile`;
+there is no `DEVFREQ_COOLING` symbol any more. `PM_DEVFREQ` is a `menuconfig`
+that `select`s `PM_OPP`, and `DEVFREQ_THERMAL` depends on both.
+
+`build_kernel.sh` enables all four and then **asserts** they survived
+`olddefconfig`, because `scripts/config` only edits text: a request for a
+symbol that does not exist, or whose dependencies are unmet, is discarded
+without complaint, and the cost of learning that is a failed driver link hours
+later. Enabling these four does not weaken the debug configuration — KASAN,
+KASAN_GENERIC, UBSAN, KCOV, DWARF5, `RANDOMIZE_BASE=n` and `MODVERSIONS=n` are
+all unaffected, so Arm's deviation rules still hold.
+
+**2. `Module.symvers` must be placed where modpost looks for it.** For an
+external module the kernel Makefile sets `objtree` to the *kernel* build tree
+(Makefile:186) and `scripts/Makefile.modpost` reads
+`$(objtree)/Module.symvers` from there — not from the module's own directory.
+`modules_prepare` never produces it, so modpost loads no exported-symbol table
+at all and reports even core symbols — `jiffies_to_msecs`, `current_task`,
+`_raw_spin_trylock` — as undefined. `build_driver.sh` copies in the one the
+completed kernel build produced. This is needed whether or not
+`CONFIG_MODVERSIONS=y`: MODVERSIONS only adds CRCs, the symbol table itself is
+always required.
+
+**3. Patches must be applied before the first `olddefconfig`.** Arm's ordering
+configures the kernel first and applies patches afterwards. That cannot work
+here, because the r56p0 Kconfig bug in patch 0003 kills `olddefconfig` outright
+— the builder never reaches the patch stage. The builder now applies the set
+before resolving the config, matching the order in Arm's own guide.

@@ -31,10 +31,10 @@ fi
 note ''
 note '[+] r56p0 port set (applied by build_driver.sh by default):'
 r56_count="$(find "$R56" -maxdepth 1 -name '*.patch' 2>/dev/null | wc -l)"
-if [[ "$r56_count" -eq 2 ]]; then
+if [[ "$r56_count" -eq 3 ]]; then
     find "$R56" -maxdepth 1 -name '*.patch' -printf '  %f\n' | sort
 else
-    bad "expected 2 patches in $R56, found $r56_count"
+    bad "expected 3 patches in $R56, found $r56_count"
 fi
 
 # ---- Provenance: the port must stay traceable to Arm ----------------------

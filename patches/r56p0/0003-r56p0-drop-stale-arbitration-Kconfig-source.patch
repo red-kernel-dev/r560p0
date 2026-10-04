@@ -1,0 +1,61 @@
+From: r56p0 port for the Mali r56p0 x86_64 research kit
+Subject: [PATCH 3/3] r56p0: disable the source of the absent arbitration Kconfig
+
+Upstream Arm's 0006-Fix-make-clean-when-no-arbitration-code-present.patch wraps
+the arbitration reference in the midgard Kbuild. That patch cannot help here,
+for two independent reasons:
+
+  1. The r56p0 Kbuild contains no arbitration reference at all, so there is
+     nothing for 0006 to guard.
+  2. 0006 never touched the Kconfig, and the Kconfig is what actually breaks.
+
+drivers/gpu/arm/Kconfig unconditionally sources
+
+    source "$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/arbitration/Kconfig"
+
+but drivers/gpu/arm/ contains only midgard/, there is no arbitration/ directory
+anywhere in the release, and CONFIG_MALI_HAS_VIRTUALIZATION is referenced neither
+in any Kbuild nor in any Kconfig. MALI_KCONFIG_EXT_PREFIX is never assigned here,
+so it expands to nothing. The result is a hard configure failure, before any
+patching could be reached:
+
+    drivers/gpu/arm/Kconfig:25: can't open file "drivers/gpu/arm/arbitration/Kconfig"
+    make[3]: *** [.../scripts/kconfig/Makefile:85: olddefconfig] Error 1
+
+NOTE ON MECHANISM: the line must be disabled with a "#" comment. Wrapping it in
+"#if 0" does NOT work. kconfig includes a sourced file even inside a false
+conditional block; this was confirmed empirically against 6.18.55, where the
+"#if 0" variant still failed with the error above (reported at the shifted line
+number of the still-live source statement).
+
+---
+--- a/product/kernel/drivers/gpu/arm/Kconfig
++++ b/product/kernel/drivers/gpu/arm/Kconfig
+@@ -22,7 +22,26 @@
+ source "$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/midgard/Kconfig"
+ 
+ 
+-source "$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/arbitration/Kconfig"
++# r56p0 port: this line is DISABLED with a comment, not with "#if 0".
++# kconfig includes a sourced file even inside a false #if block, so "#if 0"
++# does NOT work here; only commenting the line out does. Verified against
++# 6.18.55: "#if 0" still fails olddefconfig with
++#   drivers/gpu/arm/Kconfig:34: can't open file "drivers/gpu/arm/arbitration/Kconfig"
++#
++# Why this is needed: the arbitration reference-code directory is not shipped
++# in the r56p0-18eac0 release. drivers/gpu/arm/ contains only midgard/, there is
++# no arbitration/ anywhere, and CONFIG_MALI_HAS_VIRTUALIZATION is referenced
++# neither in any Kbuild nor in any Kconfig. MALI_KCONFIG_EXT_PREFIX is never
++# assigned in this release, so it expands to nothing.
++#
++# Arm's 0006 does not help: the r56p0 Kbuild has no arbitration reference for it
++# to guard, and 0006 never touched the Kconfig, which is what actually breaks.
++# Guarding is safe because nothing in the release defines or consumes the
++# arbitration symbols, and Arm confirms the arbitration code is optional:
++# "in most cases the Arbitration code is not required, such as in testing
++# systems where only a single Guest OS is using the GPU."
++# (Virtual Platform How-To Guide, Troubleshooting)
++#source "$(MALI_KCONFIG_EXT_PREFIX)drivers/gpu/arm/arbitration/Kconfig"
+ 
+ endmenu
+ 

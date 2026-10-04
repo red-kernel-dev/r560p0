@@ -1,0 +1,13 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // This kit is pure Bash: 11 scripts that make up the whole pipeline
+  // (init_ -> build_kernel -> verify_patches -> build_driver -> build_rootfs
+  // -> boot_kernel_gdb -> make_manifest). `true` enables OpenCode's built-in
+  // servers, which for Bash means bash-language-server -- it auto-installs on
+  // first use and provides completion, diagnostics and hover for those scripts.
+  //
+  // Use the object form instead if you ever want to narrow or extend this:
+  //   "lsp": { "bash": { "command": ["bash-language-server", "start"] } }
+  "lsp": true,
+}

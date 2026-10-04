@@ -191,6 +191,50 @@ scripts/config \
     --disable CONFIG_RANDOMIZE_BASE
 
 # ------------------------------------------------------------
+# Mali driver prerequisites
+# ------------------------------------------------------------
+#
+# The Mali driver is built out-of-tree by driver/build_driver.sh, but it links
+# against the exports of THIS kernel. modpost therefore fails unless every
+# symbol it imports is already built into vmlinux. The r56p0 Kbase needs these
+# four subsystems; without them mali_kbase.ko reports 16 undefined symbols and
+# cannot link (measured, not theoretical):
+#
+#   CONFIG_COMMON_CLK            __clk_is_enabled                    drivers/clk/clk.c
+#   CONFIG_PM_DEVFREQ            devfreq_add_device, devfreq_suspend_device,
+#                                devfreq_resume_device,
+#                                devfreq_register_opp_notifier,
+#                                devfreq_unregister_opp_notifier,
+#                                devfreq_recommended_opp,
+#                                devfreq_remove_device               drivers/devfreq/devfreq.c
+#   CONFIG_PM_OPP                dev_pm_opp_find_freq_{ceil,exact,floor},
+#                                dev_pm_opp_get_opp_count,
+#                                dev_pm_opp_get_voltage,
+#                                dev_pm_opp_put                      drivers/opp/core.c
+#   CONFIG_DEVFREQ_THERMAL       devfreq_cooling_em_register,
+#                                devfreq_cooling_unregister          drivers/thermal/devfreq_cooling.c
+#
+# Notes:
+#   * The devfreq symbol is PM_DEVFREQ, not DEVFREQ. It was renamed in 6.13;
+#     setting the old name silently does nothing.
+#   * PM_DEVFREQ is a menuconfig that `select PM_OPP`, so PM_OPP is pulled in
+#     automatically. It is set explicitly anyway to keep the intent readable.
+#   * DEVFREQ_THERMAL depends on PM_DEVFREQ && PM_OPP. Its object is added by
+#     drivers/thermal/Makefile as thermal_sys-$(CONFIG_DEVFREQ_THERMAL).
+#   * DEVFREQ_GOV_SIMPLE_ONDEMAND is what midgard/Kconfig selects for the
+#     coarse_demand power policy, which the research plan exercises.
+#   * ARM Mali itself is deliberately NOT enabled here. The driver is an external
+#     module; enabling it in-tree would defeat the purpose of the kit.
+
+scripts/config \
+    --file "$CONFIG" \
+    --enable CONFIG_COMMON_CLK \
+    --enable CONFIG_PM_OPP \
+    --enable CONFIG_PM_DEVFREQ \
+    --enable CONFIG_DEVFREQ_THERMAL \
+    --enable CONFIG_DEVFREQ_GOV_SIMPLE_ONDEMAND
+
+# ------------------------------------------------------------
 # Normalize configuration
 # ------------------------------------------------------------
 
@@ -201,6 +245,37 @@ make \
     O="$BUILD_DIR" \
     ARCH=x86_64 \
     olddefconfig
+
+# ------------------------------------------------------------
+# Assert the Mali driver prerequisites survived olddefconfig
+# ------------------------------------------------------------
+#
+# scripts/config only edits .config text. If a symbol does not exist in this
+# kernel, or its dependencies are unmet, olddefconfig silently discards the
+# request and the driver then fails to link much later with a wall of
+# "undefined symbol" errors. Fail here instead, with the actual value.
+
+echo
+echo "[+] Verifying Mali driver prerequisites in .config..."
+
+mali_prereq_ok=1
+for sym in COMMON_CLK PM_OPP PM_DEVFREQ DEVFREQ_THERMAL DEVFREQ_GOV_SIMPLE_ONDEMAND; do
+    if grep -qx "CONFIG_${sym}=y" "$CONFIG"; then
+        printf '    %-36s y\n' "CONFIG_${sym}"
+    else
+        printf '    %-36s %s  <-- NOT BUILT IN\n' \
+            "CONFIG_${sym}" \
+            "$(grep -E "^(CONFIG_${sym}=|# CONFIG_${sym} )" "$CONFIG" || echo absent)"
+        mali_prereq_ok=0
+    fi
+done
+
+if [[ "$mali_prereq_ok" -ne 1 ]]; then
+    echo
+    echo "[!] One or more Mali driver prerequisites did not survive olddefconfig."
+    echo "    driver/build_driver.sh will fail at modpost with undefined symbols."
+    exit 1
+fi
 
 # Save exact configuration used.
 cp \
